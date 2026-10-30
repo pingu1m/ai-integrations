@@ -547,10 +547,8 @@ class StatefulMCPServerProvider:
             # each of its operations fails with the same error, so the workflow
             # sees that error at its first MCP call whatever its
             # schedule-to-start timeout.
-            rejected = (
-                _has_dynamic_tool_filter(server)
-                or _has_worker_side_require_approval(server)
-            )
+            has_filter = _has_dynamic_tool_filter(server)
+            rejected = has_filter or _has_worker_side_require_approval(server)
             self._servers[server_id] = server
             try:
                 try:
