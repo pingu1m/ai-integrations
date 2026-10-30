@@ -2973,11 +2973,16 @@ async def test_mcp_server_factory_argument(client: Client, stateful: bool):
                 )
 
 
+@pytest.mark.parametrize("setting", ["require_approval", "tool_filter"])
 @pytest.mark.parametrize("stateful", [True, False])
-async def test_mcp_server_factory_require_approval_is_rejected(
-    client: Client, stateful: bool
+async def test_mcp_server_factory_settings_are_rejected(
+    client: Client, stateful: bool, setting: str
 ):
-    tracking_server = get_tracking_server("HelloServer", require_approval="always")
+    if setting == "require_approval":
+        tracking_server = get_tracking_server("HelloServer", require_approval="always")
+    else:
+        tracking_server = get_tracking_server("HelloServer")
+        tracking_server.tool_filter = lambda context, tool: True  # type: ignore[attr-defined]
     server: StatefulMCPServerProvider | StatelessMCPServerProvider = (
         StatefulMCPServerProvider("HelloServer", lambda _: tracking_server)
         if stateful
@@ -3019,6 +3024,7 @@ async def test_mcp_server_factory_require_approval_is_rejected(
     assert isinstance(err.value.cause.cause, ApplicationError)
     assert err.value.cause.cause.non_retryable
     assert "temporal_mcp_server()" in err.value.cause.cause.message
+    assert setting in err.value.cause.cause.message
     # The rejected server is never connected, cleaned up or called.
     assert tracking_server.calls == []
     if stateful:

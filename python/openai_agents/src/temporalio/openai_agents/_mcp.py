@@ -30,6 +30,24 @@ from temporalio.worker import PollerBehaviorSimpleMaximum, Worker
 from temporalio.workflow import ActivityConfig, ActivityHandle
 
 
+def _reject_dynamic_tool_filter(name: str, server: MCPServer) -> None:
+    """Fail fast on a worker-side filter that can never be applied.
+
+    A callable ``tool_filter`` needs the run context and agent, which exist only
+    in the workflow, so the Agents SDK rejects one on the worker side and the
+    list-tools Activity would otherwise retry forever. A static filter needs
+    neither and is applied here as usual.
+    """
+    if callable(getattr(server, "tool_filter", None)):
+        raise ApplicationError(
+            f"MCP server {name!r} sets a callable tool_filter on its worker-side "
+            "MCPServer, which cannot be applied there because the run context "
+            "and agent it receives exist only in the workflow; pass the filter "
+            "to temporal_mcp_server() instead",
+            non_retryable=True,
+        )
+
+
 def _reject_worker_side_require_approval(name: str, server: MCPServer) -> None:
     """Fail fast on a worker-side approval policy that would be ignored.
 
@@ -209,6 +227,7 @@ class StatelessMCPServerProvider:
             )
         else:
             server = cast(Callable[[], MCPServer], self._server_factory)()
+        _reject_dynamic_tool_filter(self.name, server)
         _reject_worker_side_require_approval(self.name, server)
         return server
 
@@ -510,6 +529,7 @@ class StatefulMCPServerProvider:
 
         def _server() -> MCPServer:
             server = self._servers[_server_id()]
+            _reject_dynamic_tool_filter(self.name, server)
             _reject_worker_side_require_approval(self.name, server)
             return server
 
@@ -557,11 +577,13 @@ class StatefulMCPServerProvider:
                     "Cannot connect to an already running server. Use a distinct name if running multiple servers in one workflow."
                 )
             server = self._server_factory(args.factory_argument if args else None)
-            # A server with a worker-side approval policy is never connected.
-            # The dedicated worker still runs, and each of its operations fails
-            # with the policy error, so the workflow sees that error at its
-            # first MCP call whatever its schedule-to-start timeout.
+            # A server with a callable tool filter or a worker-side approval
+            # policy is never connected. The dedicated worker still runs, and
+            # each of its operations fails with the same error, so the workflow
+            # sees that error at its first MCP call whatever its
+            # schedule-to-start timeout.
             try:
+                _reject_dynamic_tool_filter(self.name, server)
                 _reject_worker_side_require_approval(self.name, server)
                 rejected = False
             except ApplicationError:
