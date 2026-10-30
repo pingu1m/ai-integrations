@@ -4,21 +4,22 @@ from uuid import uuid4
 from strands import tool
 from strands.interrupt import Interrupt, InterruptException
 from strands.types.interrupt import InterruptResponseContent
+from strands.types.tools import ToolContext
 
 from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.strands_agents import StrandsPlugin, TemporalAgent
 from temporalio.strands_agents.workflow import activity_as_tool
 from temporalio.worker import Replayer, Worker
-from tests.common import get_activities
+from tests.common import get_activities, get_tool_results
 from tests.mock_model import MockModel
 
 
-@tool
-def in_workflow_delete(name: str) -> str:
-    raise InterruptException(
-        Interrupt(id=f"delete:{name}", name="approval", reason=f"delete {name}?")
-    )
+@tool(context=True)
+def in_workflow_delete(name: str, tool_context: ToolContext) -> str:
+    if tool_context.interrupt("approval", reason=f"delete {name}?") != "approve":
+        return f"kept {name}"
+    return f"deleted {name}"
 
 
 # Counts attempts so the activity raises on the first invocation and succeeds on
@@ -52,8 +53,9 @@ class InWorkflowToolInterruptWorkflow:
         self._approval = response
 
     @workflow.run
-    async def run(self, prompt: str) -> str:
+    async def run(self, prompt: str) -> list[str]:
         result = await self.agent.invoke_async(prompt)
+        stop_reasons: list[str] = [result.stop_reason]
         while result.stop_reason == "interrupt":
             await workflow.wait_condition(lambda: self._approval is not None)
             response, self._approval = self._approval, None
@@ -62,7 +64,8 @@ class InWorkflowToolInterruptWorkflow:
                 for i in (result.interrupts or [])
             ]
             result = await self.agent.invoke_async(responses)
-        return str(result)
+            stop_reasons.append(result.stop_reason)
+        return [*stop_reasons, str(result)]
 
 
 @workflow.defn
@@ -125,7 +128,8 @@ async def test_in_workflow_tool_interrupt(client: Client):
             task_queue=task_queue,
         )
         await handle.signal(InWorkflowToolInterruptWorkflow.approve, "approve")
-        assert await handle.result() == "Done!\n"
+        # The sync tool ran in the workflow, so the agent stopped with its interrupt.
+        assert await handle.result() == ["interrupt", "end_turn", "Done!\n"]
 
     history = await handle.fetch_history()
     # No activity call for the in-workflow @tool — only model calls.
@@ -134,6 +138,8 @@ async def test_in_workflow_tool_interrupt(client: Client):
         "invoke_model",
         "invoke_model",
     ]
+    # After the approval, the model got the tool's result.
+    assert get_tool_results(history) == [[{"text": "deleted foo"}]]
 
     await Replayer(
         workflows=[InWorkflowToolInterruptWorkflow],
